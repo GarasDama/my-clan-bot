@@ -81,7 +81,7 @@ class PointSetModal(discord.ui.Modal):
         db.set(target_user_id, user_data)
         await interaction.followup.send(f"**{self.target_user.display_name}** さんのポイントを操作しました。", ephemeral=True)
         await self.panel_view.update_display(self.target_user)
-
+# --- 管理者パネル本体のUI View ---
 class AdminPanelView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
@@ -89,15 +89,41 @@ class AdminPanelView(discord.ui.View):
         self.message = None
         self.selected_user_id = None
         self._update_player_select()
+
+    # ★★★★★ ここを効率的な処理に修正しました ★★★★★
     def _update_player_select(self):
-        all_data = db.all()
-        options = [discord.SelectOption(label=data.get("name", key), value=key) for key, data in all_data.items() if not key.startswith("_")]
-        if not options: options.append(discord.SelectOption(label="データがありません", value="no_data"))
-        player_select = discord.ui.Select(placeholder="▼ 確認・操作したいプレイヤーを選択", options=options, row=0)
+        # データベースから全データを一度に取得
+        all_player_data = db.all()
+        
+        # 取得したデータから選択肢を作成
+        options = []
+        for key, data in all_player_data.items():
+            # 内部管理用のキー（例: _internal_tracker）は無視
+            if key.startswith("_"):
+                continue
+            
+            # データが辞書形式で、'name'キーがあればそれをラベルに使う
+            if isinstance(data, dict):
+                label = data.get("name", key) # 名前がなければIDを表示
+                options.append(discord.SelectOption(label=label, value=key))
+
+        if not options:
+            options.append(discord.SelectOption(label="データがありません", value="no_data"))
+        
+        # ドロップダウンメニューを作成
+        player_select = discord.ui.Select(
+            placeholder="▼ 確認・操作したいプレイヤーを選択",
+            options=options,
+            row=0
+        )
         player_select.callback = self.on_player_select
-        # self.children はViewのコンポーネントリスト。最初の要素がSelectなら置き換え、なければ追加
-        if len(self.children) > 0 and isinstance(self.children[0], discord.ui.Select): self.children[0] = player_select
-        else: self.add_item(player_select)
+        
+        # 既存のSelectメニューがあれば置き換える
+        if len(self.children) > 0 and isinstance(self.children[0], discord.ui.Select):
+            self.children[0] = player_select
+        else:
+            self.add_item(player_select)
+
     async def update_display(self, user: discord.Member):
         target_user_id = str(user.id)
         user_data = db.get(target_user_id, {"public_reputation":{"points":0}, "internal_rating":{"points":0,"history":[]}})
@@ -106,29 +132,38 @@ class AdminPanelView(discord.ui.View):
         embed.add_field(name="公開評判", value=f"**{user_data.get('public_reputation', {}).get('points', 0)} pt**", inline=True)
         embed.add_field(name="内部評価", value=f"**{user_data.get('internal_rating', {}).get('points', 0)} pt**", inline=True)
         history_text = ""
-        for h in user_data.get('internal_rating', {}).get('history', [])[:3]: history_text += f"- `{h['points']:+}pt` by {h['by_name']}: {h['comment'][:30]}\n"
+        for h in user_data.get('internal_rating', {}).get('history', [])[:3]:
+            history_text += f"- `{h['points']:+}pt` by {h['by_name']}: {h['comment'][:30]}\n"
         if not history_text: history_text = "まだありません"
         embed.add_field(name="最近の評価履歴", value=history_text, inline=False)
         if self.message: await self.message.edit(embed=embed, view=self)
+
     async def on_player_select(self, interaction: discord.Interaction):
         if not interaction.data["values"]: return
         selected_value = interaction.data["values"][0]
-        if selected_value == "no_data": return await interaction.response.defer()
+        if selected_value == "no_data":
+            # データがない場合は何もしない
+            await interaction.response.defer()
+            return
         self.selected_user_id = selected_value
         member = interaction.guild.get_member(int(self.selected_user_id))
-        if not member: return await interaction.response.send_message("メンバーが見つかりませんでした。", ephemeral=True)
+        if not member:
+            return await interaction.response.send_message("メンバーが見つかりませんでした。", ephemeral=True)
         await interaction.response.defer()
         await self.update_display(member)
+
     @discord.ui.button(label="ポイント上書き(SET)", style=discord.ButtonStyle.danger, row=1)
     async def point_set_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.selected_user_id: return await interaction.response.send_message("先にプレイヤーを選択してください。", ephemeral=True)
         member = interaction.guild.get_member(int(self.selected_user_id))
         await interaction.response.send_modal(PointSetModal(target_user=member, mode='set', panel_view=self))
+
     @discord.ui.button(label="ポイント加算(ADD)", style=discord.ButtonStyle.primary, row=1)
     async def point_add_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.selected_user_id: return await interaction.response.send_message("先にプレイヤーを選択してください。", ephemeral=True)
         member = interaction.guild.get_member(int(self.selected_user_id))
         await interaction.response.send_modal(PointSetModal(target_user=member, mode='add', panel_view=self))
+
     @discord.ui.button(label="閉じる", style=discord.ButtonStyle.secondary, row=2)
     async def close_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="パネルを閉じました。", view=None, embed=None)
