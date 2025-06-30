@@ -23,42 +23,46 @@ DAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
 ROLES = ["gold", "mid", "exp", "jg", "roam"] # これは events.py に移動させるべきかもしれません
 
 def parse_schedule_message(message_content: str) -> list[dict] | None:
-    """ユーザーの書き込みを1行ずつ解析して、予定データのリストを返す"""
+    print(f"\n--- DEBUG: parse_schedule_message ---")
+    print(f"入力メッセージ: '{message_content}'")
     lines = message_content.strip().split('\n')
     parsed_schedules = []
-    
     day_map = { a: i for i, day_list in enumerate([("月", "月曜"), ("火", "火曜"), ("水", "水曜"), ("木", "木曜"), ("金", "金曜"), ("土", "土曜"), ("日", "日曜")]) for a in day_list }
 
     for line in lines:
         line = line.strip()
+        print(f"解析中の行: '{line}'")
         if not line: continue
 
-        # 曜日範囲のパターン (例: 月〜金, 月曜-木曜)
         range_pattern = re.compile(r"([月火水木金土日])(?:曜日)?\s*[~〜-]\s*([月火水木金土日])(?:曜日)?(.*)")
         range_match = range_pattern.match(line)
         
-        days_to_process = []
+        days_to_process, line_for_parse = [], ""
         if range_match:
             start_day_jp, end_day_jp, rest_of_line = range_match.groups()
+            print(f"曜日範囲パターンに一致: {start_day_jp} から {end_day_jp}")
             start_idx, end_idx = day_map.get(start_day_jp), day_map.get(end_day_jp)
             if start_idx is not None and end_idx is not None and start_idx <= end_idx:
-                days_to_process = DAYS_JP[start_idx : end_idx + 1]
+                days_to_process = ["月", "火", "水", "木", "金", "土", "日"][start_idx : end_idx + 1]
                 line_for_parse = rest_of_line.strip()
             else:
-                continue # 不正な範囲指定
+                print(" -> 不正な曜日範囲のためスキップ")
+                continue
         else:
-            # 単日指定のパターン
             single_day_pattern = re.compile(r"([月火水木金土日])(?:曜日)?(.*)")
             single_match = single_day_pattern.match(line)
-            if not single_match: continue
+            if not single_match:
+                print(" -> どの曜日パターンにも一致せずスキップ")
+                continue
             days_to_process = [single_match.group(1)]
             line_for_parse = single_match.group(2).strip()
+            print(f"単日パターンに一致: {days_to_process[0]}")
 
-        # 時間と状態を解析
         time_status_pattern = re.compile(r"^(.*?)\s*(参加|一時参加|休み|無理|不参加)?$")
         ts_match = time_status_pattern.match(line_for_parse)
         time_str = ts_match.group(1).strip()
         status_jp = ts_match.group(2) if ts_match.group(2) else "参加"
+        print(f"時間: '{time_str}', 状態: '{status_jp}'")
         
         status_en = "休み" if status_jp in ["休み", "無理", "不参加"] else status_jp
         time_str = "終日" if not time_str else time_str
@@ -66,6 +70,8 @@ def parse_schedule_message(message_content: str) -> list[dict] | None:
         for day in days_to_process:
             parsed_schedules.append({"day": day, "time": time_str, "status": status_en})
 
+    print(f"解析結果: {parsed_schedules}")
+    print(f"--- DEBUG: parse_schedule_message 完了 ---")
     return parsed_schedules if parsed_schedules else None
 
 def get_max_name_length(schedules: dict) -> int:
@@ -430,6 +436,44 @@ class ShiftCog(commands.Cog):
             import traceback
             traceback.print_exc()
             await interaction.followup.send(f"❌ Excelファイルの作成中にエラーが発生しました: {e}", ephemeral=True)
+            
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """スレッド内の書き込みを監視し、予定を自動で記録する"""
+        if message.author.bot or not isinstance(message.channel, discord.Thread): return
+
+        schedules = db.get("shift_schedules", {})
+        thread_id_str = str(message.channel.id)
+        user_id_str = next((uid for uid, udata in schedules.items() if udata.get("thread_id") == thread_id_str), None)
+        
+        if not user_id_str or user_id_str != str(message.author.id): return
+
+        # ★★★ ここからデバッグログ付き ★★★
+        print(f"\n\n--- on_message TRIGGERED by {message.author.display_name} ---")
+        
+        parsed_list = parse_schedule_message(message.content)
+        
+        if parsed_list is None:
+            print(" -> 解析結果がNoneのため、エラーメッセージを返信します。")
+            error_message = (f"{message.author.mention} 書き方が違うようです！\n"
+                             "基本の形: `曜日 時間 状態` で入力してくださいね。")
+            try: await message.reply(error_message, delete_after=20)
+            except: pass
+            return
+
+        print(f" -> DB更新対象: {len(parsed_list)}件")
+        for parsed in parsed_list:
+            day_key = f"day_{parsed['day']}"
+            schedules[user_id_str].setdefault("schedule", {})[day_key] = f"{parsed['time']} ({parsed['status']})"
+        
+        db.set("shift_schedules", schedules)
+        print(" -> DB更新完了。")
+        try:
+            await message.add_reaction("✅")
+            print(" -> リアクション付与完了。")
+        except discord.Forbidden:
+            print(f"ERROR: リアクション付与の権限がありません in {message.channel.name}")
+        print("--- on_message FINISHED ---")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ShiftCog(bot))
