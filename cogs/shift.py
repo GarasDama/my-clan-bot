@@ -336,7 +336,7 @@ class ShiftCog(commands.Cog):
     @shift.command(name="export_timeline_excel", description="全員分の予定を集計し、詳細なタイムライン形式のExcelファイルとして出力します。")
     @app_commands.checks.has_permissions(manage_threads=True)
     async def export_timeline_excel(self, interaction: Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         schedules = db.get("shift_schedules", {})
         if not schedules:
