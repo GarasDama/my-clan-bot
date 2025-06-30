@@ -4,7 +4,7 @@ from discord.ext import commands
 from db_handler import db
 import config
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- 定数 ---
 REPROCESS_EMOJI = '🔄'  # 再処理に使う絵文字
