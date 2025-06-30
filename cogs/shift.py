@@ -347,7 +347,8 @@ class ShiftCog(commands.Cog):
         app_commands.Choice(name="日曜日", value="日"),
     ])
     async def export_day_excel(self, interaction: Interaction, day: app_commands.Choice[str]):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
 
         schedules = db.get("shift_schedules", {})
         if not schedules:
