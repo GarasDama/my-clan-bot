@@ -342,87 +342,100 @@ class ShiftCog(commands.Cog):
 
 # cogs/shift.py の ShiftCog クラス内に追記
 
-    @shift.command(name="export_timeline_excel", description="全員分の予定を集計し、詳細なタイムライン形式のExcelファイルとして出力します。")
+    @shift.command(name="export_day", description="指定した曜日の詳細なタイムライン形式のExcelファイルを出力します。")
     @app_commands.checks.has_permissions(manage_threads=True)
-    async def export_timeline_excel(self, interaction: Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+    @app_commands.describe(day="出力したい曜日を選択してください。")
+    @app_commands.choices(day=[
+        app_commands.Choice(name="月曜日", value="月"),
+        app_commands.Choice(name="火曜日", value="火"),
+        app_commands.Choice(name="水曜日", value="水"),
+        app_commands.Choice(name="木曜日", value="木"),
+        app_commands.Choice(name="金曜日", value="金"),
+        app_commands.Choice(name="土曜日", value="土"),
+        app_commands.Choice(name="日曜日", value="日"),
+    ])
+    async def export_day_excel(self, interaction: Interaction, day: app_commands.Choice[str]):
+        await interaction.response.defer(ephemeral=True)
 
         schedules = db.get("shift_schedules", {})
         if not schedules:
             return await interaction.followup.send("スケジュールデータがありません。", ephemeral=True)
 
         try:
+            # 必要なライブラリをインポート
             import openpyxl
             from openpyxl.styles import Font, Alignment, PatternFill
             from io import BytesIO
-            import openpyxl.utils # ★ 修正点
 
+            # Excelブックとシートを作成
             wb = openpyxl.Workbook()
-            if "Sheet" in wb.sheetnames:
-                wb.remove(wb["Sheet"])
+            ws = wb.active
+            ws.title = f"{day.name}のシフト"
 
-            days = ["月", "火", "水", "木", "金", "土", "日"]
-            time_blocks = time_range_blocks("20:00", "24:00", 30)
-            
+            # 色の定義
             fills = {
-                "参加": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
-                "一時参加": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
-                "休み": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
-                "未定": PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),
+                "参加": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),  # 緑
+                "一時参加": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"), # 黄
+                "休み": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"), # 赤
+                "未定": PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"),    # グレー
             }
             center_alignment = Alignment(horizontal='center', vertical='center')
 
-            for day_jp in days:
-                ws = wb.create_sheet(title=f"{day_jp}曜日")
-                
-                header = ["名前"] + [block[0] for block in time_blocks]
-                ws.append(header)
-                for cell in ws[1]:
-                    cell.font = Font(bold=True)
-                    cell.alignment = center_alignment
-
-                # ★★★ 修正点: .items()でキーと値の両方を取得 ★★★
-                for user_id, user_data in schedules.items():
-                    row = [user_data.get("name", f"ID:{user_id}")]
-                    schedule_for_day = user_data.get("schedule", {}).get(f"day_{day_jp}", "未定 (未定)")
-                    
-                    match = re.search(r"\((.+?)\)$", schedule_for_day)
-                    status = match.group(1) if match else "未定"
-                    time_str = schedule_for_day.replace(f"({status})", "").strip()
-                    user_start, user_end = parse_time_range(time_str)
-
-                    for t_block in time_blocks:
-                        cell_status = "未定"
-                        if status == "休み":
-                            cell_status = "休み"
-                        elif status in ["参加", "一時参加"]:
-                            if is_in_timeblock(t_block, user_start, user_end):
-                                cell_status = status
-                        row.append(cell_status)
-                    
-                    ws.append(row)
-
-                    row_index = ws.max_row
-                    # ★★★ 修正点: 変数名を row に統一 ★★★
-                    for col_index, status_value in enumerate(row[1:], 2):
-                        cell = ws.cell(row=row_index, column=col_index)
-                        cell.fill = fills.get(status_value, fills["未定"])
-                        cell.alignment = center_alignment
-
-                # 列幅を調整
-                ws.column_dimensions['A'].width = get_max_name_length(schedules) * 1.2 + 2
-                for i in range(2, len(header) + 1):
-                    ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 12
+            # ヘッダー行を作成 (名前, 20:00, 20:30, ...)
+            time_blocks = time_range_blocks("20:00", "24:00", 30)
+            header = ["名前"] + [block[0] for block in time_blocks]
+            ws.append(header)
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = center_alignment
             
+            # メンバーごとの行を作成
+            for user_id, user_data in schedules.items():
+                name = user_data.get("name", f"ID:{user_id}")
+                schedule_for_day = user_data.get("schedule", {}).get(f"day_{day.value}", "未定") # day.valueは "月"など
+                
+                row_values = [name]
+
+                # "(参加)" のような部分から状態を抽出
+                match = re.search(r"\((.+?)\)$", schedule_for_day)
+                status = match.group(1) if match else "未定"
+                time_str = schedule_for_day.replace(f"({status})", "").strip()
+                user_start, user_end = parse_time_range(time_str)
+
+                # 各時間ブロックのセルを埋める
+                for t_block in time_blocks:
+                    cell_status = "未定"
+                    if status == "休み":
+                        cell_status = "休み"
+                    elif status in ["参加", "一時参加"]:
+                        if is_in_timeblock(t_block, user_start, user_end):
+                            cell_status = status
+                    
+                    row_values.append(cell_status)
+                
+                ws.append(row_values)
+                
+                # セルに色を付ける
+                row_index = ws.max_row
+                for col_index, status_value in enumerate(row_values[1:], 2):
+                    cell = ws.cell(row=row_index, column=col_index)
+                    cell.fill = fills.get(status_value, fills["未定"])
+            
+            # 列幅を調整
+            ws.column_dimensions['A'].width = get_max_name_length(schedules) * 1.2 + 4
+            for i in range(2, len(header) + 1):
+                ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 10
+
+            # メモリ上でファイルを保存
             virtual_workbook = BytesIO()
             wb.save(virtual_workbook)
             virtual_workbook.seek(0)
             
-            file = discord.File(fp=virtual_workbook, filename=f"shift_timeline_{datetime.now().strftime('%Y%m%d')}.xlsx")
-            await interaction.followup.send("✅ タイムライン形式のExcelシフト表を作成しました。", file=file, ephemeral=True)
+            file = discord.File(fp=virtual_workbook, filename=f"shift_{day.name}_{datetime.now().strftime('%Y%m%d')}.xlsx")
+            await interaction.followup.send(f"✅ {day.name}のタイムライン形式Excelシフト表を作成しました。", file=file, ephemeral=True)
 
         except ImportError:
-            await interaction.followup.send("❌ `openpyxl`ライブラリがインストールされていません。`requirements.txt`を確認してください。", ephemeral=True)
+            await interaction.followup.send("❌ `openpyxl`ライブラリがインストールされていません。", ephemeral=True)
         except Exception as e:
             print(f"Excel作成エラー: {e}")
             import traceback
