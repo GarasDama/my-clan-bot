@@ -40,6 +40,78 @@ def format_name(name: str, max_len: int) -> str:
     padding = " " * (max_len - current_len)
     return f"{name}{padding}"
 
+# --- ヘルパー関数 ---
+def parse_schedule_message(message_content: str) -> list[dict] | None:
+    """ユーザーの書き込みを1行ずつ解析して、予定データのリストを返す"""
+    lines = message_content.strip().split('\n')
+    parsed_schedules = []
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        pattern = re.compile(r"([月火水木金土日])(?:曜日)?\s*(.*?)\s*(参加|一時参加|休み|無理|不参加)?$")
+        match = pattern.match(line)
+        if not match: continue
+        day_jp = match.group(1)
+        time_str = match.group(2).strip()
+        status_jp = match.group(3) if match.group(3) else "参加"
+        status_en = "休み" if status_jp in ["休み", "無理", "不参加"] else status_jp
+        time_str = "終日" if not time_str else time_str
+        parsed_schedules.append({"day": day_jp, "time": time_str, "status": status_en})
+    return parsed_schedules if parsed_schedules else None
+
+def get_max_name_length(schedules: dict) -> int:
+    """シフトデータから最も長い名前の表示長を取得する（全角は2、半角は1として計算）"""
+    max_len = 0
+    for user_data in schedules.values():
+        name = user_data.get("name", "")
+        length = sum(2 if ord(char) > 255 else 1 for char in name)
+        if length > max_len: max_len = length
+    return max_len if max_len > 4 else 4
+
+def format_name(name: str, max_len: int) -> str:
+    """指定された最大長に合わせて名前の後ろに半角スペースを追加する"""
+    current_len = sum(2 if ord(char) > 255 else 1 for char in name)
+    padding = " " * (max_len - current_len)
+    return f"{name}{padding}"
+
+def parse_time_range(time_str: str, default_start="20:00", default_end="24:00"):
+    """時間文字列を解析して開始・終了タプルを返す"""
+    if not time_str: return (default_start, default_end)
+    time_str = time_str.strip()
+    m = re.match(r"(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})", time_str)
+    if m: return (f"{int(m.group(1)):02}:{m.group(2)}", f"{int(m.group(3)):02}:{m.group(4)}")
+    m = re.match(r"(\d{1,2}):(\d{2})\s*まで", time_str)
+    if m: return (default_start, f"{int(m.group(1)):02}:{m.group(2)}")
+    m = re.match(r"(\d{1,2}):(\d{2})\s*[~から]", time_str)
+    if m: return (f"{int(m.group(1)):02}:{m.group(2)}", default_end)
+    return (default_start, default_end)
+
+def time_range_blocks(start="20:00", end="24:00", interval_min=30):
+    """指定された時間範囲を、指定された間隔で分割した時間ブロックのリストを生成する"""
+    try:
+        start_dt = datetime.strptime(start, "%H:%M")
+        end_dt = datetime.strptime(end, "%H:%M") if end != "24:00" else datetime.strptime("23:59", "%H:%M") + timedelta(minutes=1)
+    except ValueError:
+        start_dt, end_dt = datetime.strptime("20:00", "%H:%M"), datetime.strptime("23:59", "%H:%M") + timedelta(minutes=1)
+    
+    blocks, t = [], start_dt
+    while t < end_dt:
+        blocks.append((t.strftime("%H:%M"), (t + timedelta(minutes=interval_min)).strftime("%H:%M")))
+        t += timedelta(minutes=interval_min)
+    return blocks
+
+def is_in_timeblock(tblock, user_start, user_end):
+    """特定の時間ブロックが、ユーザーの参加可能時間に含まれるか判定する"""
+    try:
+        s0 = datetime.strptime(tblock[0], "%H:%M")
+        s1 = datetime.strptime(tblock[1], "%H:%M")
+        r0 = datetime.strptime(user_start, "%H:%M")
+        r1 = datetime.strptime(user_end, "%H:%M") if user_end != "24:00" else datetime.strptime("23:59", "%H:%M") + timedelta(minutes=1)
+        return max(s0, r0) < min(s1, r1)
+    except ValueError:
+        return False
+
+# --- ★★★★★ ここまで追加 ★★★★★ ---
 # --- Cog本体 ---
 class ShiftCog(commands.Cog):
     """週間の活動予定（シフト）を管理する機能"""
