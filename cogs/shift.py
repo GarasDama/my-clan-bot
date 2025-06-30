@@ -7,62 +7,60 @@ import re
 from datetime import datetime, timedelta
 from io import BytesIO
 
-# openpyxlはExcel作成に必要。Renderでは自動でインストールされる場合があるが、明示的にimport
 try:
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill
+    from openpyxl.utils import get_column_letter
 except ImportError:
-    # この場合、Excel出力コマンドはエラーメッセージを出す
     openpyxl = None
 
 # --- 定数 ---
-REPROCESS_EMOJI = '🔄'  # 再処理に使う絵文字
-
-# --- 定数とヘルパー関数 ---
+REPROCESS_EMOJI = '🔄'
 DAYS_JP = ["月", "火", "水", "木", "金", "土", "日"]
-ROLES = ["gold", "mid", "exp", "jg", "roam"] # これは events.py に移動させるべきかもしれません
+DAYS_JP_FULL = ["月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜"]
+DAYS_JP_ALL = DAYS_JP_FULL + DAYS_JP # "月曜"を先にチェックするため
+
+# --- ★★★★★ ここから下のヘルパー関数を全て置き換えます ★★★★★ ---
 
 def parse_schedule_message(message_content: str) -> list[dict] | None:
-    print(f"\n--- DEBUG: parse_schedule_message ---")
-    print(f"入力メッセージ: '{message_content}'")
     lines = message_content.strip().split('\n')
     parsed_schedules = []
-    day_map = { a: i for i, day_list in enumerate([("月", "月曜"), ("火", "火曜"), ("水", "水曜"), ("木", "木曜"), ("金", "金曜"), ("土", "土曜"), ("日", "日曜")]) for a in day_list }
+    day_map_rev = {day[0]: i for i, day in enumerate(DAYS_JP_ALL)}
 
     for line in lines:
         line = line.strip()
-        print(f"解析中の行: '{line}'")
         if not line: continue
-
-        range_pattern = re.compile(r"([月火水木金土日])(?:曜日)?\s*[~〜-]\s*([月火水木金土日])(?:曜日)?(.*)")
-        range_match = range_pattern.match(line)
         
-        days_to_process, line_for_parse = [], ""
+        days_to_process, rest_of_line = [], ""
+        
+        # 曜日範囲パターンを先にチェック
+        range_match = re.match(r"([月火水木金土日])(?:曜)?\s*[~〜-]\s*([月火水木金土日])(?:曜)?(.*)", line)
         if range_match:
-            start_day_jp, end_day_jp, rest_of_line = range_match.groups()
-            print(f"曜日範囲パターンに一致: {start_day_jp} から {end_day_jp}")
-            start_idx, end_idx = day_map.get(start_day_jp), day_map.get(end_day_jp)
+            start_day, end_day, rest = range_match.groups()
+            start_idx, end_idx = day_map_rev.get(start_day), day_map_rev.get(end_day)
             if start_idx is not None and end_idx is not None and start_idx <= end_idx:
-                days_to_process = ["月", "火", "水", "木", "金", "土", "日"][start_idx : end_idx + 1]
-                line_for_parse = rest_of_line.strip()
-            else:
-                print(" -> 不正な曜日範囲のためスキップ")
-                continue
-        else:
-            single_day_pattern = re.compile(r"([月火水木金土日])(?:曜日)?(.*)")
-            single_match = single_day_pattern.match(line)
-            if not single_match:
-                print(" -> どの曜日パターンにも一致せずスキップ")
-                continue
-            days_to_process = [single_match.group(1)]
-            line_for_parse = single_match.group(2).strip()
-            print(f"単日パターンに一致: {days_to_process[0]}")
+                days_to_process = DAYS_JP[start_idx : end_idx + 1]
+                rest_of_line = rest.strip()
+            else: continue
+        else: # 単日パターン
+            found_day = None
+            for day_str in DAYS_JP_ALL:
+                if line.startswith(day_str):
+                    found_day = day_str[0]
+                    rest_of_line = line[len(day_str):].strip()
+                    break
+            if found_day:
+                days_to_process.append(found_day)
+            else: continue
 
-        time_status_pattern = re.compile(r"^(.*?)\s*(参加|一時参加|休み|無理|不参加)?$")
-        ts_match = time_status_pattern.match(line_for_parse)
-        time_str = ts_match.group(1).strip()
-        status_jp = ts_match.group(2) if ts_match.group(2) else "参加"
-        print(f"時間: '{time_str}', 状態: '{status_jp}'")
+        # 時間と状態を解析
+        time_str = rest_of_line
+        status_jp = "参加"
+        for s in ["一時参加", "参加", "休み", "無理", "不参加"]:
+            if rest_of_line.endswith(s):
+                status_jp = s
+                time_str = rest_of_line[:-len(s)].strip()
+                break
         
         status_en = "休み" if status_jp in ["休み", "無理", "不参加"] else status_jp
         time_str = "終日" if not time_str else time_str
@@ -70,12 +68,10 @@ def parse_schedule_message(message_content: str) -> list[dict] | None:
         for day in days_to_process:
             parsed_schedules.append({"day": day, "time": time_str, "status": status_en})
 
-    print(f"解析結果: {parsed_schedules}")
-    print(f"--- DEBUG: parse_schedule_message 完了 ---")
     return parsed_schedules if parsed_schedules else None
 
 def get_max_name_length(schedules: dict) -> int:
-    max_len = 4 # "名前"の長さ
+    max_len = 4
     for user_data in schedules.values():
         name = user_data.get("name", "")
         length = sum(2 if ord(char) > 255 else 1 for char in name)
@@ -90,11 +86,12 @@ def format_name(name: str, max_len: int) -> str:
 def parse_time_range(time_str: str, default_start="20:00", default_end="24:00"):
     if not time_str or time_str == "終日": return (default_start, default_end)
     time_str = time_str.strip()
+    # 全角チルダにも対応
     m = re.match(r"(\d{1,2}):(\d{2})\s*[~〜-]\s*(\d{1,2}):(\d{2})", time_str)
     if m: return (f"{int(m.group(1)):02}:{m.group(2)}", f"{int(m.group(3)):02}:{m.group(4)}")
     m = re.match(r"(\d{1,2}):(\d{2})\s*まで", time_str)
     if m: return (default_start, f"{int(m.group(1)):02}:{m.group(2)}")
-    m = re.match(r"(\d{1,2}):(\d{2})\s*[~から]", time_str)
+    m = re.match(r"(\d{1,2}):(\d{2})\s*[~〜から]", time_str)
     if m: return (f"{int(m.group(1)):02}:{m.group(2)}", default_end)
     return (default_start, default_end)
 
